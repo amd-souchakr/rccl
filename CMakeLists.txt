@@ -43,17 +43,8 @@ option(FAULT_INJECTION                         "Enable fault injection"         
 # Default GPU architectures to build
 #==================================================================================================
 set(DEFAULT_GPUS
-      gfx906
-      gfx908
-      gfx90a
-      gfx942
       gfx950
-      gfx1030
-      gfx1100
-      gfx1101
-      gfx1102
-      gfx1200
-      gfx1201)
+      )
 
 # Load CMake modules
 #==================================================================================================
@@ -458,6 +449,7 @@ set(SRC_FILES
   src/device/rccl_metadata.h
   src/device/sendrecv.h
   src/device/common.cu
+  src/device/barrier.cu
   src/device/onerank.cu
   src/device/network/unpack/unpack_defs.h
   src/device/network/unpack/unpack.h

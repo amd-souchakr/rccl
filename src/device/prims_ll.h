@@ -10,6 +10,28 @@
 #include "npkit/npkit.h"
 #endif
 
+// This does the barrier for nthreads != NCCL_MAX_NTHREADS
+extern __device__  void
+generic_barrier(int nthreads, uint64_t& barrier_next, __shared__ uint64_t* barriers);
+
+// Per Alex Breslow, there should be no need for buffer_inv and buffer_wbl instructions
+// if GPU memory is uncached. These functions are memory fences that just do the
+// various waitcnt operations and also tell the compiler not to reorder loads and
+// stores beyond the fence.
+__device__ inline void fence_acq_rel() {
+  // tell compiler not to move load or stores around this
+  __atomic_signal_fence(__ATOMIC_SEQ_CST);
+  // wait for all counters to be 0
+  __builtin_amdgcn_s_waitcnt(0);
+}
+
+__device__ inline void fence_rel() {
+  // Don't move memory after this
+  __atomic_signal_fence(__ATOMIC_RELEASE);
+  // wait for all counters to be 0
+  __builtin_amdgcn_s_waitcnt(0);
+}
+
 template<typename T, typename RedOp, typename Fan, int Direct, int P2p, bool isNetOffload, int useAcc>
 class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload, useAcc>:
     public PrimitivesWithoutDirect<Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload, useAcc>> {
@@ -68,12 +90,14 @@ private:
   uint64_t* barriers;
   uint64_t barrier_next = 0;
 
-  inline __device__ void barrier() {
+  // In this primitive, barrier does not include memory fence. They need to be
+  // added as appropriate
+  __device__ inline void barrier() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-      // always use the full fence and the whole-device barrier
-      // probably can remove some __atomic stores with the
-      // buffer_inv memory fence.
-      barrier_generic(__threadfence(), nthreads, barrier_next, barriers);
+    if (nthreads == NCCL_MAX_NTHREADS)  // use the workgroup barrier instruction
+      __builtin_amdgcn_s_barrier();
+    else
+      generic_barrier(nthreads, barrier_next, barriers);
 #else
     if (nthreads == WARP_SIZE) {
       __syncwarp();
@@ -82,6 +106,7 @@ private:
     }
 #endif
   }
+
 
   int abort = 0;
 
@@ -108,13 +133,15 @@ private:
       int spins = 0;
       while (sendConnHeadCache + NCCL_STEPS < sendConnHead + 1) {
         __builtin_amdgcn_s_sleep(1);
-        sendConnHeadCache = atomicAdd((unsigned long long *)sendConnHeadPtr, 0);
+        fence_acq_rel();
+        sendConnHeadCache = *sendConnHeadPtr;
         if (checkAbort(abort, 1, spins)) break;
       }
       if (sendConnFifo) {
         int size = ((sendConnHead & NCCL_LL_CLEAN_MASK) == NCCL_LL_CLEAN_MASK) ? stepLines*sizeof(union ncclLLFifoLine) : nbytes;
         sendConnFifo[sendConnHead%NCCL_STEPS].size = size;
       }
+      fence_acq_rel();
       sendConnHead += 1;
     }
     barrier();
@@ -128,19 +155,24 @@ private:
 
   inline __device__ void incRecv(int i) {
     recvStep[i] += 1;
+    fence_rel();
   }
   inline __device__ void postRecv() {
+    fence_acq_rel();
     barrier();
     if (recvConnHeadPtr) STORE(recvConnHeadPtr, recvConnHead += 1);
+    fence_acq_rel();
   }
 
   inline __device__ void incSend(int i, int offset) {
     // LL Cleanup : write all flags in the slice to make sure we don't have
     // data corruption when flag loops over.
+    fence_acq_rel();
     if ((sendStep[i] & NCCL_LL_CLEAN_MASK) == NCCL_LL_CLEAN_MASK) {
       for (int o = offset; o<stepLines; o+=nthreads) storeLL(sendPtr(i)+o, 0, sendFlag(i));
     }
     sendStep[i]++;
+    fence_acq_rel();
   }
 
   __device__ uint64_t readLL(int offset, int i) {
@@ -160,6 +192,7 @@ private:
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     union ncclLLFifoLine i4;
     do {
+      fence_acq_rel();
 #ifdef __GFX11__
       asm volatile ("global_load_b128 %0, %1, off glc slc dlc\n"
         "s_waitcnt vmcnt(0)\n" : "=v"(i4.i4) : "v"(&src->i4));
@@ -201,6 +234,7 @@ private:
       // Yes, for some template arguments this code will be unreachable.  That's fine.
       // coverity[dead_error_line]
       if (i < fan.nrecv()) {
+        fence_acq_rel();
         union ncclLLFifoLine* src = recvPtr(i) + offset;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #ifdef __GFX11__
@@ -229,6 +263,7 @@ private:
 #endif
 
     do {
+      fence_acq_rel();
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #ifdef __GFX11__
       asm volatile ("global_load_b128 %0, %1, off glc slc dlc\n"
@@ -260,15 +295,19 @@ private:
   __device__ void storeLL(union ncclLLFifoLine* dst, uint64_t val, uint32_t flag) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 
-#if 0 /*(defined(__gfx950__) && defined(HIP_HOST_UNCACHED_MEMORY))*/
+#if defined(__gfx950__)
+
     using Vec = uint32_t __attribute__((ext_vector_type(4)));
     Vec i4;
     i4[0] = val & 0xffffffff;
     i4[1] = flag;
     i4[2] = (val >> 32);
     i4[3] = flag;
-    asm volatile ("flat_store_dwordx4 %0, %1 sc0 sc1 nt" :: "v"(dst), "v"(i4));
-#elif 0
+    asm volatile ("flat_store_dwordx4 %0, %1" :: "v"(dst), "v"(i4));
+    fence_rel();
+
+#else
+
     union ncclLLFifoLine i4;
     i4.data1 = val & 0xffffffff;
     i4.flag1 = flag;
@@ -276,6 +315,10 @@ private:
     i4.flag2 = flag;
     __builtin_nontemporal_store(i4.v[0], dst->v);
     __builtin_nontemporal_store(i4.v[1], dst->v+1);
+    fence_rel();
+
+#endif
+/*
 #else
     // the atomic stores force system scope but also insert a buffer_inv.
     // it maybe be possible to remove that now that barrier has a buffer_inv
@@ -287,6 +330,7 @@ private:
     __atomic_store_n(dst->v,   i4.v[0], __ATOMIC_SEQ_CST);
     __atomic_store_n(dst->v+1, i4.v[1], __ATOMIC_SEQ_CST);
 #endif
+*/
 #else
     asm volatile("st.volatile.global.v4.u32 [%0], {%1,%2,%3,%4};" :: "l"(&dst->i4), "r"((uint32_t)val), "r"(flag), "r"((uint32_t)(val >> 32)), "r"(flag) : "memory");
 #endif
@@ -303,6 +347,7 @@ private:
       uint32_t u4;
       uint64_t u8;
     };
+    fence_acq_rel();
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     if(sizeof(U) == 1)
 #ifdef __GFX11__
@@ -360,6 +405,7 @@ private:
       __builtin_nontemporal_store(u4, (uint32_t*)dst);
     else
       __builtin_nontemporal_store(u8, (uint64_t*)dst);
+    fence_rel();
 #else
     if(sizeof(U) == 1)
       asm volatile("st.volatile.global.b8 [%0],%1;" :: "l"(dst), "r"(u4) : "memory");
@@ -381,6 +427,7 @@ private:
     };
 
     __device__ void loadBegin(T *src, int eltN) {
+      fence_acq_rel();
       if (sizeof(T) <= 2) {
         misalign = reinterpret_cast<uintptr_t>(src)%4;
         uint32_t *p = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(src) & -uintptr_t(4));
@@ -424,6 +471,7 @@ private:
         //store(dst+i, elt[i]);
         dst[i] = elt[i];
     }
+    fence_rel();
   }
 
   __device__ void mscclStoreData(T *dst, uint64_t val, int eltN) {
@@ -441,8 +489,6 @@ private:
   }
 
   template <int RECV, int SEND, int SrcBuf, int DstBuf>
-  // This can be inlined now. The problems were mosst likely
-  // due to memory ordering issues with aggressive optimization
   __device__ void LLGenericOp(intptr_t srcIx, intptr_t dstIx, int nelem, bool postOp) {
     constexpr int SRC = SrcBuf != -1 ? 1 : 0;
     constexpr int DST = DstBuf != -1 ? 1 : 0;
@@ -671,7 +717,6 @@ public:
     tid(tid), nthreads(nthreads), wid(tid%WARP_SIZE), group(group),
     stepLines(ncclShmem.comm.buffSizes[NCCL_PROTO_LL]/NCCL_STEPS/sizeof(ncclLLFifoLine)) {
     auto *channel = &ncclShmem.channel;
-    // assume that nthreads is the workgroup size
     barriers = &ncclShmem.groups[group].barrier;
     // If we are going to support oneshot collNet + LL, then we would need to add connector index here
     int nrecv=0, nsend=0;
