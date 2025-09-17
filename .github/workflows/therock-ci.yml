@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amdgpu_family: [gfx94X-dcgpu, gfx950-dcgpu]
+        amdgpu_family: [gfx94X-dcgpu]
     uses: ./.github/workflows/therock-ci-linux.yml
     secrets: inherit
     with:

@@ -18,7 +18,8 @@ jobs:
     permissions:
       id-token: write
     container:
-      image: ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:6108926e0b794a4633a6af92647eae5983c4de23c3147f27d73b35cdc709d531
+      # Container image built with ompi 5.0.8
+      image: ghcr.io/rocm/therock_build_manylinux_x86_64@sha256:f4d596f53351679108c0501f3f0c2b8ca5c9f83087906d30665d53237631e6d9
       options: -v /runner/config:/home/awsconfig/
     env:
       AMDGPU_FAMILIES: ${{ inputs.amdgpu_families }}
@@ -109,12 +110,11 @@ jobs:
 
   therock-test-linux-multi-node:
     name: "Test multi-node"
-    if: ${{ inputs.amdgpu_families == 'gfx950-dcgpu' }}
     needs: [therock-build-linux]
     uses: ./.github/workflows/therock-test-packages-multi-node.yml
     with:
-      amdgpu_families: ${{ inputs.amdgpu_families }}
-      test_runs_on: nova-linux-slurm-scale-runner
+      amdgpu_families: 'gfx94X-dcgpu'
+      test_runs_on: vultr-linux-rocm
       artifact_run_id: ${{ github.run_id }}
 
   therock-test-linux-single-node:
