@@ -10,6 +10,13 @@
 #include "npkit/npkit.h"
 #endif
 
+inline __device__ void membar() {
+  // Wait for outstanding loads and stores
+  // to complete. Note stores complete
+  // when they hit L2 cache.
+  __builtin_amdgcn_s_waitcnt(0);
+}
+
 template<typename T, typename RedOp, typename Fan, int Direct, int P2p, bool isNetOffload, int useAcc>
 class Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload, useAcc>:
     public PrimitivesWithoutDirect<Primitives<T, RedOp, Fan, Direct, ProtoLL, P2p, isNetOffload, useAcc>> {
@@ -70,10 +77,9 @@ private:
 
   inline __device__ void barrier() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-      // always use the full fence and the whole-device barrier
-      // probably can remove some __atomic stores with the
-      // buffer_inv memory fence.
-      barrier_generic(__threadfence(), nthreads, barrier_next, barriers);
+      // use a memory barrier for the fence. This does not
+      // flush or invalidate L2
+      barrier_generic(membar(), nthreads, barrier_next, barriers);
 #else
     if (nthreads == WARP_SIZE) {
       __syncwarp();
@@ -87,10 +93,10 @@ private:
 
   __device__ inline int checkAbort(int &abortCache, const int abortValue, int &spins) {
     if (abortCache == 0 && ++spins == NCCL_SPINS_BEFORE_CHECK_ABORT) {
-      int abort = __atomic_load_n((ncclShmem.comm.abortFlag), __ATOMIC_SEQ_CST);
+      int abort = *const_cast<volatile uint32_t *>(ncclShmem.comm.abortFlag);
       spins = 0;
       if (abort) {
-        __atomic_store_n(&ncclShmem.aborted, abort, __ATOMIC_SEQ_CST);
+        ncclShmem.aborted = abort;
         abortCache |= abortValue;
       }
     }
@@ -108,7 +114,8 @@ private:
       int spins = 0;
       while (sendConnHeadCache + NCCL_STEPS < sendConnHead + 1) {
         __builtin_amdgcn_s_sleep(1);
-        sendConnHeadCache = atomicAdd((unsigned long long *)sendConnHeadPtr, 0);
+        // This is modified off device, and it's volatile, just load it
+        sendConnHeadCache = *sendConnHeadPtr;
         if (checkAbort(abort, 1, spins)) break;
       }
       if (sendConnFifo) {
@@ -166,6 +173,7 @@ private:
 #else
       i4.v[0] = __builtin_nontemporal_load(src->v);
       i4.v[1] = __builtin_nontemporal_load(src->v+1);
+      // no need for a membar, store is local
 #endif
 #if defined(ENABLE_NPKIT) && (defined(ENABLE_NPKIT_EVENT_PRIM_LL_DATA_PROCESS_ENTRY) && defined(ENABLE_NPKIT_EVENT_PRIM_LL_DATA_PROCESS_EXIT) || defined(ENABLE_NPKIT_PRIM_COLLECT_DATA_PROCESS_TIME))
       npkitWaitRecvSpins++;
@@ -215,6 +223,7 @@ private:
 #endif
       }
     }
+    membar();   // make sure all line have been stored
   }
   __device__ uint64_t readLLFinish(int offset, ncclLLFifoLine(&line)[MaxRecv], int i) {
     union ncclLLFifoLine* src = recvPtr(i) + offset;
@@ -276,6 +285,7 @@ private:
     i4.flag2 = flag;
     __builtin_nontemporal_store(i4.v[0], dst->v);
     __builtin_nontemporal_store(i4.v[1], dst->v+1);
+    membar();
 #else
     // the atomic stores force system scope but also insert a buffer_inv.
     // it maybe be possible to remove that now that barrier has a buffer_inv
@@ -286,6 +296,7 @@ private:
     i4.flag2 = flag;
     __atomic_store_n(dst->v,   i4.v[0], __ATOMIC_SEQ_CST);
     __atomic_store_n(dst->v+1, i4.v[1], __ATOMIC_SEQ_CST);
+    membar();
 #endif
 #else
     asm volatile("st.volatile.global.v4.u32 [%0], {%1,%2,%3,%4};" :: "l"(&dst->i4), "r"((uint32_t)val), "r"(flag), "r"((uint32_t)(val >> 32)), "r"(flag) : "memory");
@@ -309,6 +320,7 @@ private:
       u1 = __atomic_load_n((uint8_t*)src, __ATOMIC_RELAXED);
 #else
       u1 = __builtin_nontemporal_load((uint8_t*)src);
+      // no need for membar
 #endif
     else if(sizeof(U) == 2)
 #ifdef __GFX11__
@@ -360,6 +372,7 @@ private:
       __builtin_nontemporal_store(u4, (uint32_t*)dst);
     else
       __builtin_nontemporal_store(u8, (uint64_t*)dst);
+    membar();
 #else
     if(sizeof(U) == 1)
       asm volatile("st.volatile.global.b8 [%0],%1;" :: "l"(dst), "r"(u4) : "memory");
@@ -441,8 +454,6 @@ private:
   }
 
   template <int RECV, int SEND, int SrcBuf, int DstBuf>
-  // This can be inlined now. The problems were mosst likely
-  // due to memory ordering issues with aggressive optimization
   __device__ void LLGenericOp(intptr_t srcIx, intptr_t dstIx, int nelem, bool postOp) {
     constexpr int SRC = SrcBuf != -1 ? 1 : 0;
     constexpr int DST = DstBuf != -1 ? 1 : 0;
