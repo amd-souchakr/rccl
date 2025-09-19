@@ -269,7 +269,7 @@ private:
   __device__ void storeLL(union ncclLLFifoLine* dst, uint64_t val, uint32_t flag) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 
-#if 0 /*(defined(__gfx950__) && defined(HIP_HOST_UNCACHED_MEMORY))*/
+#if 1 /*(defined(__gfx950__) && defined(HIP_HOST_UNCACHED_MEMORY))*/
     using Vec = uint32_t __attribute__((ext_vector_type(4)));
     Vec i4;
     i4[0] = val & 0xffffffff;
@@ -277,6 +277,7 @@ private:
     i4[2] = (val >> 32);
     i4[3] = flag;
     asm volatile ("flat_store_dwordx4 %0, %1 sc0 sc1 nt" :: "v"(dst), "v"(i4));
+    membar();
 #elif 0
     union ncclLLFifoLine i4;
     i4.data1 = val & 0xffffffff;
