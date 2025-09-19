@@ -74,4 +74,4 @@ jobs:
           python3 build_tools/github_actions/test_reporting_script.py \
             --run-id "${{ github.run_id }}" \
             --amdgpu-family "${{ inputs.amdgpu_families }}" \
-            --report-path "/var/www/html/cvs/"
+            --report-path "/home/arravikum/cvs/ci_test_report.html"
