@@ -28,6 +28,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    permissions:
+      contents: read
+      id-token: write
     env:
       VENV_DIR: ${{ github.workspace }}/.venv
       ARTIFACT_RUN_ID: "${{ inputs.artifact_run_id }}"
