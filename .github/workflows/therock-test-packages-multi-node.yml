@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: "ROCm/TheRock"
-          ref: c701afc579905b9aa95eb9e2572cdc0161136b41
+          ref: c85b576010b3c6caf0b2c38fe56d8f26de066e03
 
       - name: Run setup test environment workflow
         uses: './.github/actions/setup_test_environment'
