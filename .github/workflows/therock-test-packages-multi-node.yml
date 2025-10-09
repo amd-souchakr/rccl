@@ -87,4 +87,4 @@ jobs:
             --run-id "${{ github.run_id }}" \
             --amdgpu-family "${{ inputs.amdgpu_families }}" \
             --report-path "/home/arravikum/cvs/test_reports" \
-            --log-destination "/logs/gfx950-dcgpu/multinode-ci-logs"
+            --log-destination "/logs/gfx950-dcgpu"
