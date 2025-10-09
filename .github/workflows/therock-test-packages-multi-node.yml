@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: "ROCm/TheRock"
-          ref: e359006df8e35930522fb7b5f57e71e30a75d1c7
+          ref: c701afc579905b9aa95eb9e2572cdc0161136b41
 
       - name: Run setup test environment workflow
         uses: './.github/actions/setup_test_environment'
@@ -87,3 +87,4 @@ jobs:
             --run-id "${{ github.run_id }}" \
             --amdgpu-family "${{ inputs.amdgpu_families }}" \
             --report-path "/home/arravikum/cvs/test_reports"
+            --log-destination "/logs/gfx950-dcgpu/multinode-ci-logs"
